@@ -5,7 +5,7 @@ import os
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(page_title="Учет роторной печи v4.3", layout="wide")
+st.set_page_config(page_title="Учет роторной печи v4.4", layout="wide")
 
 DB_FILE = "furnace_data.xlsx"
 
@@ -44,7 +44,6 @@ if 'edit_index' not in st.session_state:
     st.session_state.edit_index = None
 
 st.title("🔥 Мониторинг эффективности плавки")
-st.write("Визуальный анализ производства и ресурсов")
 
 # --- БОКОВАЯ ПАНЕЛЬ ---
 st.sidebar.header("📝 Ввод данных")
@@ -96,58 +95,58 @@ if submit:
     save_data(st.session_state.db)
     st.rerun()
 
-# --- ВИЗУАЛИЗАЦИЯ (ДВЕ ОСИ Y ДЛЯ НАГЛЯДНОСТИ) ---
+# --- ВИЗУАЛИЗАЦИЯ ---
 if not st.session_state.db.empty:
-    df_a = st.session_state.db.copy()
-    chart_df = df_a.sort_values(["Дата", "№ смены"]).copy()
+    chart_df = st.session_state.db.sort_values(["Дата", "№ смены"]).copy()
     chart_df["Метка"] = chart_df.apply(lambda x: f"{x['Дата'].strftime('%d.%m')} №{x['№ смены']}", axis=1)
 
-    st.subheader("📊 Сравнительная динамика металла и топлива")
+    st.subheader("📊 Посменная динамика: Металл и Топливо")
     
-    # Создаем график с двумя осями Y
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    # Столбики Металла (Основная ось Y - Левая)
+    # Металл (Левая ось)
     fig.add_trace(
         go.Bar(x=chart_df["Метка"], y=chart_df["Выход металла (кг)"], 
                name="Металл (кг)", marker_color='#2E86C1', 
-               text=chart_df["Выход металла (кг)"], textposition='auto'),
+               text=chart_df["Выход металла (кг)"], textposition='auto',
+               offsetgroup=1), # Группа 1
         secondary_y=False,
     )
 
-    # Столбики Топлива (Вспомогательная ось Y - Правая)
+    # Топливо (Правая ось)
     fig.add_trace(
         go.Bar(x=chart_df["Метка"], y=chart_df["Расход (м3)"], 
                name="Топливо (м3)", marker_color='#E67E22',
-               text=chart_df["Расход (м3)"], textposition='auto'),
+               text=chart_df["Расход (м3)"], textposition='auto',
+               offsetgroup=2), # Группа 2
         secondary_y=True,
     )
 
-    # Настройка осей (Начало шкалы металла с 1000 кг для наглядности)
     fig.update_layout(
-        title_text="Производство посменно",
         legend=dict(x=0.5, y=1.1, orientation="h", xanchor="center"),
-        barmode='group',
-        height=600
+        height=600,
+        hovermode="x unified",
+        # barmode='group' здесь не сработает напрямую с разными осями, 
+        # поэтому мы используем offsetgroup для разделения столбиков
     )
 
-    fig.update_yaxes(title_text="<b>Металл (кг)</b>", secondary_y=False, range=[1000, max(chart_df["Выход металла (кг)"])*1.1])
-    fig.update_yaxes(title_text="<b>Топливо (м3)</b>", secondary_y=True, range=[0, max(chart_df["Расход (м3)"])*1.5])
+    # Ограничение оси металла от 1000 кг
+    fig.update_yaxes(title_text="<b>Металл (кг)</b>", secondary_y=False, 
+                     range=[1000, max(chart_df["Выход металла (кг)"])*1.1])
+    fig.update_yaxes(title_text="<b>Топливо (м3)</b>", secondary_y=True, 
+                     range=[0, max(chart_df["Расход (м3)"])*1.2])
 
     st.plotly_chart(fig, use_container_width=True)
 
-    # Таблицы
-    t1, t2 = st.tabs(["📋 Таблица результатов", "⚙️ Журнал"])
+    # Таблица и Журнал
+    t1, t2 = st.tabs(["📋 Таблица", "⚙️ Журнал"])
     with t1:
-        # Расчет эффективности для таблицы
-        df_a["КПД"] = df_a.apply(lambda x: x["Выход металла (кг)"] / x["Расход (м3)"] if x["Расход (м3)"] > 0 else 0, axis=1)
-        max_k = df_a["КПД"].max()
-        df_a["Эффективность (%)"] = df_a["КПД"].apply(lambda x: round((x / max_k * 100), 1) if max_k > 0 else 0)
-        
-        view_df = df_a.drop(columns=["ID", "КПД"]).copy()
-        view_df["Дата"] = view_df["Дата"].dt.date
-        st.dataframe(view_df.sort_values(["Дата", "№ смены"], ascending=False), use_container_width=True)
-
+        df_view = st.session_state.db.copy()
+        df_view["КПД"] = df_view.apply(lambda x: x["Выход металла (кг)"] / x["Расход (м3)"] if x["Расход (м3)"] > 0 else 0, axis=1)
+        max_k = df_view["КПД"].max()
+        df_view["Эффективность (%)"] = df_view["КПД"].apply(lambda x: round((x / max_k * 100), 1) if max_k > 0 else 0)
+        df_view["Дата"] = df_view["Дата"].dt.date
+        st.dataframe(df_view.drop(columns=["ID", "КПД"]).sort_values(["Дата", "№ смены"], ascending=False), use_container_width=True)
     with t2:
         for idx, row in st.session_state.db.iterrows():
             c1, c2, c3, c4 = st.columns([1, 4, 1, 1])
@@ -159,5 +158,3 @@ if not st.session_state.db.empty:
             if c4.button("🗑️", key=f"d_{idx}"): 
                 st.session_state.db = st.session_state.db.drop(idx).reset_index(drop=True)
                 save_data(st.session_state.db); st.rerun()
-else:
-    st.info("Данных нет. Пожалуйста, введите результаты смены.")
