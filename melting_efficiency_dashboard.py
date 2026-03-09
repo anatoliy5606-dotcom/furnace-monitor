@@ -3,8 +3,9 @@ import streamlit as st
 from datetime import datetime
 import os
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
-st.set_page_config(page_title="Учет роторной печи v4.2", layout="wide")
+st.set_page_config(page_title="Учет роторной печи v4.3", layout="wide")
 
 DB_FILE = "furnace_data.xlsx"
 
@@ -13,7 +14,6 @@ def load_data():
     if os.path.exists(DB_FILE):
         try:
             df = pd.read_excel(DB_FILE)
-            # Автоматическое приведение заголовков к стандарту
             rename_map = {
                 "Мастер смены": "Мастер",
                 "Расход топлива": "Расход (м3)",
@@ -22,13 +22,10 @@ def load_data():
                 "Счетчик топлива (м3)": "Счетчик (м3)"
             }
             df = df.rename(columns=rename_map)
-            
-            # Проверка и создание недостающих колонок
             required = ["ID", "Дата", "Смена", "№ смены", "Мастер", "Выход металла (кг)", "Счетчик (м3)", "Расход (м3)"]
             for col in required:
                 if col not in df.columns:
                     df[col] = 0 if "кг" in col or "м3" in col else ""
-            
             df["Дата"] = pd.to_datetime(df["Дата"])
             return df
         except Exception as e:
@@ -40,32 +37,29 @@ def save_data(df):
     df = df.sort_values(["Дата", "№ смены"])
     df.to_excel(DB_FILE, index=False)
 
-# Инициализация состояния
 if 'db' not in st.session_state:
     st.session_state.db = load_data()
 
 if 'edit_index' not in st.session_state:
     st.session_state.edit_index = None
 
-st.title("🔥 Учет эффективности плавки роторной печи")
+st.title("🔥 Мониторинг эффективности плавки")
+st.write("Визуальный анализ производства и ресурсов")
 
 # --- БОКОВАЯ ПАНЕЛЬ ---
-st.sidebar.header("📝 Ввод данных смены")
-
-masters_list = []
-if not st.session_state.db.empty:
-    masters_list = sorted(st.session_state.db["Мастер"].astype(str).unique().tolist())
+st.sidebar.header("📝 Ввод данных")
+masters_list = sorted(st.session_state.db["Мастер"].astype(str).unique().tolist()) if not st.session_state.db.empty else []
 
 if st.session_state.edit_index is not None:
     row = st.session_state.db.loc[st.session_state.edit_index]
-    st.sidebar.warning(f"Редактирование ID: {row['ID']}")
+    st.sidebar.warning(f"Правка записи ID: {row['ID']}")
     d_date, d_shift, d_num = pd.to_datetime(row["Дата"]), row["Смена"], int(row["№ смены"])
     d_master, d_metal, d_count = str(row["Мастер"]), float(row["Выход металла (кг)"]), float(row["Счетчик (м3)"])
-    btn_label = "Обновить запись"
+    btn_label = "Обновить"
 else:
     d_date, d_shift, d_num = datetime.now(), "День", 1
     d_master, d_metal, d_count = "", 0.0, 0.0
-    btn_label = "Добавить в базу"
+    btn_label = "Добавить"
 
 with st.sidebar.form("entry_form"):
     in_date = st.date_input("Дата", d_date)
@@ -85,14 +79,12 @@ if submit:
         "Мастер": final_master, "Выход металла (кг)": in_metal,
         "Счетчик (м3)": in_count, "Расход (м3)": 0.0
     }
-
     if st.session_state.edit_index is not None:
         st.session_state.db.loc[st.session_state.edit_index] = entry
         st.session_state.edit_index = None
     else:
         st.session_state.db = pd.concat([st.session_state.db, pd.DataFrame([entry])], ignore_index=True)
     
-    # ПЕРЕСЧЕТ РАСХОДА ТОПЛИВА ПО ВСЕЙ ЦЕПОЧКЕ
     st.session_state.db = st.session_state.db.sort_values(["Дата", "№ смены"]).reset_index(drop=True)
     for i in range(len(st.session_state.db)):
         if i > 0:
@@ -101,57 +93,71 @@ if submit:
             st.session_state.db.at[i, "Расход (м3)"] = round(curr_c - prev_c, 3) if curr_c >= prev_c else 0.0
         else:
             st.session_state.db.at[i, "Расход (м3)"] = 0.0
-
     save_data(st.session_state.db)
     st.rerun()
 
-# --- АНАЛИТИКА ---
+# --- ВИЗУАЛИЗАЦИЯ (ДВЕ ОСИ Y ДЛЯ НАГЛЯДНОСТИ) ---
 if not st.session_state.db.empty:
     df_a = st.session_state.db.copy()
-    
-    # Эффективность (%)
-    df_a["КПД"] = df_a.apply(lambda x: x["Выход металла (кг)"] / x["Расход (м3)"] if x["Расход (м3)"] > 0 else 0, axis=1)
-    max_kpd = df_a["КПД"].max()
-    df_a["Эффективность (%)"] = df_a["КПД"].apply(lambda x: round((x / max_kpd * 100), 1) if max_kpd > 0 else 0)
-
-    # Подготовка данных для графика
     chart_df = df_a.sort_values(["Дата", "№ смены"]).copy()
-    chart_df["Метка"] = chart_df.apply(lambda x: f"{x['Дата'].strftime('%d.%m')} №{x['№ смены']} ({x['Смена'][0]})", axis=1)
+    chart_df["Метка"] = chart_df.apply(lambda x: f"{x['Дата'].strftime('%d.%m')} №{x['№ смены']}", axis=1)
 
-    st.subheader("📊 Посменная динамика ресурсов (Лог. шкала)")
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=chart_df["Метка"], y=chart_df["Выход металла (кг)"], name="Металл (кг)", marker_color='#2E86C1', text=chart_df["Выход металла (кг)"], textposition='auto'))
-    fig.add_trace(go.Bar(x=chart_df["Метка"], y=chart_df["Расход (м3)"], name="Топливо (м3)", marker_color='#E67E22', text=chart_df["Расход (м3)"], textposition='auto'))
-    fig.update_layout(yaxis=dict(type="log", title="Лог. масштаб"), barmode='group', height=500, legend=dict(x=0.5, y=1.1, orientation="h", xanchor="center"))
+    st.subheader("📊 Сравнительная динамика металла и топлива")
+    
+    # Создаем график с двумя осями Y
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    # Столбики Металла (Основная ось Y - Левая)
+    fig.add_trace(
+        go.Bar(x=chart_df["Метка"], y=chart_df["Выход металла (кг)"], 
+               name="Металл (кг)", marker_color='#2E86C1', 
+               text=chart_df["Выход металла (кг)"], textposition='auto'),
+        secondary_y=False,
+    )
+
+    # Столбики Топлива (Вспомогательная ось Y - Правая)
+    fig.add_trace(
+        go.Bar(x=chart_df["Метка"], y=chart_df["Расход (м3)"], 
+               name="Топливо (м3)", marker_color='#E67E22',
+               text=chart_df["Расход (м3)"], textposition='auto'),
+        secondary_y=True,
+    )
+
+    # Настройка осей (Начало шкалы металла с 1000 кг для наглядности)
+    fig.update_layout(
+        title_text="Производство посменно",
+        legend=dict(x=0.5, y=1.1, orientation="h", xanchor="center"),
+        barmode='group',
+        height=600
+    )
+
+    fig.update_yaxes(title_text="<b>Металл (кг)</b>", secondary_y=False, range=[1000, max(chart_df["Выход металла (кг)"])*1.1])
+    fig.update_yaxes(title_text="<b>Топливо (м3)</b>", secondary_y=True, range=[0, max(chart_df["Расход (м3)"])*1.5])
+
     st.plotly_chart(fig, use_container_width=True)
 
-    t1, t2 = st.tabs(["📋 Сводная таблица", "⚙️ Журнал управления"])
-    
+    # Таблицы
+    t1, t2 = st.tabs(["📋 Таблица результатов", "⚙️ Журнал"])
     with t1:
+        # Расчет эффективности для таблицы
+        df_a["КПД"] = df_a.apply(lambda x: x["Выход металла (кг)"] / x["Расход (м3)"] if x["Расход (м3)"] > 0 else 0, axis=1)
+        max_k = df_a["КПД"].max()
+        df_a["Эффективность (%)"] = df_a["КПД"].apply(lambda x: round((x / max_k * 100), 1) if max_k > 0 else 0)
+        
         view_df = df_a.drop(columns=["ID", "КПД"]).copy()
         view_df["Дата"] = view_df["Дата"].dt.date
         st.dataframe(view_df.sort_values(["Дата", "№ смены"], ascending=False), use_container_width=True)
 
     with t2:
-        st.subheader("Редактирование записей")
         for idx, row in st.session_state.db.iterrows():
             c1, c2, c3, c4 = st.columns([1, 4, 1, 1])
-            
-            # БЕЗОПАСНЫЙ ВЫВОД ID (исправление TypeError)
-            try:
-                display_id = int(row['ID']) % 1000
-            except:
-                display_id = "!!!"
-                
+            try: display_id = int(row['ID']) % 1000
+            except: display_id = "!!!"
             c1.write(f"#{display_id}")
             c2.write(f"**{row['Дата'].date()}** | Смена №{row['№ смены']} | {row['Мастер']}")
-            
-            if c3.button("📝", key=f"edit_btn_{idx}"):
-                st.session_state.edit_index = idx
-                st.rerun()
-            if c4.button("🗑️", key=f"del_btn_{idx}"): 
+            if c3.button("📝", key=f"e_{idx}"): st.session_state.edit_index = idx; st.rerun()
+            if c4.button("🗑️", key=f"d_{idx}"): 
                 st.session_state.db = st.session_state.db.drop(idx).reset_index(drop=True)
-                save_data(st.session_state.db)
-                st.rerun()
+                save_data(st.session_state.db); st.rerun()
 else:
-    st.info("База данных пуста. Внесите данные первой смены слева.")
+    st.info("Данных нет. Пожалуйста, введите результаты смены.")
