@@ -1,11 +1,11 @@
 import pandas as pd
 import streamlit as st
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(page_title="Учет роторной печи v4.4", layout="wide")
+st.set_page_config(page_title="Учет роторной печи v4.5", layout="wide")
 
 DB_FILE = "furnace_data.xlsx"
 
@@ -43,9 +43,13 @@ if 'db' not in st.session_state:
 if 'edit_index' not in st.session_state:
     st.session_state.edit_index = None
 
-st.title("🔥 Мониторинг эффективности плавки")
+st.title("🔥 Финансовый мониторинг плавки")
 
 # --- БОКОВАЯ ПАНЕЛЬ ---
+st.sidebar.header("⚙️ Настройки")
+fuel_price = st.sidebar.number_input("Цена топлива (за м³)", min_value=0.0, value=120.0, step=0.1, help="Используется для расчета денежных затрат")
+
+st.sidebar.markdown("---")
 st.sidebar.header("📝 Ввод данных")
 masters_list = sorted(st.session_state.db["Мастер"].astype(str).unique().tolist()) if not st.session_state.db.empty else []
 
@@ -95,66 +99,89 @@ if submit:
     save_data(st.session_state.db)
     st.rerun()
 
-# --- ВИЗУАЛИЗАЦИЯ ---
+# --- ФИЛЬТРАЦИЯ И АНАЛИТИКА ---
 if not st.session_state.db.empty:
-    chart_df = st.session_state.db.sort_values(["Дата", "№ смены"]).copy()
-    chart_df["Метка"] = chart_df.apply(lambda x: f"{x['Дата'].strftime('%d.%m')} №{x['№ смены']}", axis=1)
-
-    st.subheader("📊 Посменная динамика: Металл и Топливо")
+    df_calc = st.session_state.db.copy()
     
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    # 1. Считаем затраты и эффективность для всей базы сразу
+    df_calc["Затраты (денег)"] = df_calc["Расход (м3)"] * fuel_price
+    df_calc["КПД"] = df_calc.apply(lambda x: x["Выход металла (кг)"] / x["Расход (м3)"] if x["Расход (м3)"] > 0 else 0, axis=1)
+    max_k = df_calc["КПД"].max()
+    df_calc["Эффективность (%)"] = df_calc["КПД"].apply(lambda x: round((x / max_k * 100), 1) if max_k > 0 else 0)
 
-    # Металл (Левая ось)
-    fig.add_trace(
-        go.Bar(x=chart_df["Метка"], y=chart_df["Выход металла (кг)"], 
-               name="Металл (кг)", marker_color='#2E86C1', 
-               text=chart_df["Выход металла (кг)"], textposition='auto',
-               offsetgroup=1), # Группа 1
-        secondary_y=False,
-    )
+    # 2. ФИЛЬТР ПО ДАТАМ
+    st.markdown("### 🔍 Фильтрация отчетов")
+    col_f1, col_f2 = st.columns([1, 2])
+    
+    period = col_f1.selectbox("Период анализа", ["Всё время", "Последние 7 дней", "Текущий месяц", "Свой диапазон"])
+    
+    min_date = df_calc["Дата"].min().date()
+    max_date = df_calc["Дата"].max().date()
+    
+    if period == "Последние 7 дней":
+        start_date = datetime.now().date() - timedelta(days=7)
+        end_date = datetime.now().date()
+    elif period == "Текущий месяц":
+        start_date = datetime.now().date().replace(day=1)
+        end_date = datetime.now().date()
+    elif period == "Свой диапазон":
+        date_range = col_f2.date_input("Выберите диапазон", [min_date, max_date])
+        if len(date_range) == 2:
+            start_date, end_date = date_range
+        else:
+            start_date = end_date = date_range[0]
+    else:
+        start_date, end_date = min_date, max_date
 
-    # Топливо (Правая ось)
-    fig.add_trace(
-        go.Bar(x=chart_df["Метка"], y=chart_df["Расход (м3)"], 
-               name="Топливо (м3)", marker_color='#E67E22',
-               text=chart_df["Расход (м3)"], textposition='auto',
-               offsetgroup=2), # Группа 2
-        secondary_y=True,
-    )
+    # Применяем фильтр
+    mask = (df_calc["Дата"].dt.date >= start_date) & (df_calc["Дата"].dt.date <= end_date)
+    df_filtered = df_calc.loc[mask].sort_values(["Дата", "№ смены"])
 
-    fig.update_layout(
-        legend=dict(x=0.5, y=1.1, orientation="h", xanchor="center"),
-        height=600,
-        hovermode="x unified",
-        # barmode='group' здесь не сработает напрямую с разными осями, 
-        # поэтому мы используем offsetgroup для разделения столбиков
-    )
+    # 3. ИТОГОВЫЕ МЕТРИКИ
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Металла за период", f"{int(df_filtered['Выход металла (кг)'].sum()):,} кг")
+    m2.metric("Топлива за период", f"{df_filtered['Расход (м3)'].sum():.2f} м³")
+    m3.metric("Общие затраты", f"{df_filtered['Затраты (денег)'].sum():,.2f} тенге", delta_color="inverse")
 
-    # Ограничение оси металла от 1000 кг
-    fig.update_yaxes(title_text="<b>Металл (кг)</b>", secondary_y=False, 
-                     range=[1000, max(chart_df["Выход металла (кг)"])*1.1])
-    fig.update_yaxes(title_text="<b>Топливо (м3)</b>", secondary_y=True, 
-                     range=[0, max(chart_df["Расход (м3)"])*1.2])
+    # --- ВИЗУАЛИЗАЦИЯ ---
+    if not df_filtered.empty:
+        df_filtered["Метка"] = df_filtered.apply(lambda x: f"{x['Дата'].strftime('%d.%m')} №{x['№ смены']}", axis=1)
+        
+        st.subheader("📊 Анализ эффективности и затрат")
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        
+        # Металл (КГ)
+        fig.add_trace(go.Bar(x=df_filtered["Метка"], y=df_filtered["Выход металла (кг)"], name="Металл (кг)", 
+                             marker_color='#2E86C1', text=df_filtered["Выход металла (кг)"], textposition='auto', offsetgroup=1), secondary_y=False)
+        
+        # Топливо (М3)
+        fig.add_trace(go.Bar(x=df_filtered["Метка"], y=df_filtered["Расход (м3)"], name="Топливо (м3)", 
+                             marker_color='#E67E22', text=df_filtered["Расход (м3)"], textposition='auto', offsetgroup=2), secondary_y=True)
 
-    st.plotly_chart(fig, use_container_width=True)
+        fig.update_layout(legend=dict(x=0.5, y=1.1, orientation="h", xanchor="center"), height=500, hovermode="x unified")
+        fig.update_yaxes(title_text="Металл (кг)", secondary_y=False, range=[1000, max(df_filtered["Выход металла (кг)"])*1.1])
+        fig.update_yaxes(title_text="Топливо (м3)", secondary_y=True, range=[0, max(df_filtered["Расход (м3)"])*1.5])
+        
+        st.plotly_chart(fig, use_container_width=True)
 
-    # Таблица и Журнал
-    t1, t2 = st.tabs(["📋 Таблица", "⚙️ Журнал"])
-    with t1:
-        df_view = st.session_state.db.copy()
-        df_view["КПД"] = df_view.apply(lambda x: x["Выход металла (кг)"] / x["Расход (м3)"] if x["Расход (м3)"] > 0 else 0, axis=1)
-        max_k = df_view["КПД"].max()
-        df_view["Эффективность (%)"] = df_view["КПД"].apply(lambda x: round((x / max_k * 100), 1) if max_k > 0 else 0)
-        df_view["Дата"] = df_view["Дата"].dt.date
-        st.dataframe(df_view.drop(columns=["ID", "КПД"]).sort_values(["Дата", "№ смены"], ascending=False), use_container_width=True)
-    with t2:
-        for idx, row in st.session_state.db.iterrows():
-            c1, c2, c3, c4 = st.columns([1, 4, 1, 1])
-            try: display_id = int(row['ID']) % 1000
-            except: display_id = "!!!"
-            c1.write(f"#{display_id}")
-            c2.write(f"**{row['Дата'].date()}** | Смена №{row['№ смены']} | {row['Мастер']}")
-            if c3.button("📝", key=f"e_{idx}"): st.session_state.edit_index = idx; st.rerun()
-            if c4.button("🗑️", key=f"d_{idx}"): 
-                st.session_state.db = st.session_state.db.drop(idx).reset_index(drop=True)
-                save_data(st.session_state.db); st.rerun()
+        # Таблицы
+        t1, t2 = st.tabs(["📋 Сводная таблица", "⚙️ Журнал"])
+        with t1:
+            display_df = df_filtered.drop(columns=["ID", "КПД"]).copy()
+            display_df["Дата"] = display_df["Дата"].dt.date
+            st.dataframe(display_df.sort_values(["Дата", "№ смены"], ascending=False), use_container_width=True)
+        with t2:
+            for idx, row in df_filtered.iterrows():
+                c1, c2, c3, c4 = st.columns([1, 4, 1, 1])
+                try: display_id = int(row['ID']) % 1000
+                except: display_id = "!!!"
+                c1.write(f"#{display_id}")
+                c2.write(f"**{row['Дата'].date()}** | Смена {row['№ смены']} | {row['Мастер']} | {row['Затраты (денег)']:,.0f} тг")
+                if c3.button("📝", key=f"e_{idx}"): st.session_state.edit_index = idx; st.rerun()
+                if c4.button("🗑️", key=f"d_{idx}"): 
+                    st.session_state.db = st.session_state.db.drop(idx).reset_index(drop=True)
+                    save_data(st.session_state.db); st.rerun()
+    else:
+        st.warning("В выбранном диапазоне дат нет данных.")
+else:
+    st.info("Пожалуйста, внесите данные первой смены.")
