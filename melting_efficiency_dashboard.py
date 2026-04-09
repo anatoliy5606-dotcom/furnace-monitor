@@ -1,187 +1,147 @@
 import pandas as pd
 import streamlit as st
-from datetime import datetime, timedelta
+from datetime import datetime
 import os
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import re
 
-st.set_page_config(page_title="Учет роторной печи v4.5", layout="wide")
+st.set_page_config(page_title="Мониторинг выплавки и затрат", layout="wide")
 
 DB_FILE = "furnace_data.xlsx"
 
-# --- ФУНКЦИИ РАБОТЫ С ДАННЫМИ ---
+# --- ЗАГРУЗКА ДАННЫХ ---
 def load_data():
     if os.path.exists(DB_FILE):
         try:
             df = pd.read_excel(DB_FILE)
+            df.columns = [str(c).strip() for c in df.columns]
             rename_map = {
-                "Мастер смены": "Мастер",
-                "Расход топлива": "Расход (м3)",
-                "Показание счетчика": "Счетчик (м3)",
-                "Вес слитого (кг)": "Выход металла (кг)",
-                "Счетчик топлива (м3)": "Счетчик (м3)"
+                "Выход металла (кг)": "Металл (кг)",
+                "Счетчик": "Счетчик (м3)", 
+                "Расход": "Расход (м3)",
+                "Комментарии (Журнал событий)": "Комментарии"
             }
             df = df.rename(columns=rename_map)
-            required = ["ID", "Дата", "Смена", "№ смены", "Мастер", "Выход металла (кг)", "Счетчик (м3)", "Расход (м3)"]
-            for col in required:
-                if col not in df.columns:
-                    df[col] = 0 if "кг" in col or "м3" in col else ""
-            df["Дата"] = pd.to_datetime(df["Дата"])
-            return df
+            req = ["ID", "Дата", "Смена", "Мастер", "Металл (кг)", "Счетчик (м3)", "Расход (м3)", "Комментарии"]
+            for c in req:
+                if c not in df.columns:
+                    df[c] = 0.0 if any(x in c for x in ["кг", "м3"]) else ""
+            for c in ["Металл (кг)", "Счетчик (м3)", "Расход (м3)"]:
+                df[c] = pd.to_numeric(df[c].astype(str).str.replace(',', '.').str.replace(r'[^\d.]', '', regex=True), errors='coerce').fillna(0.0)
+            df["Дата"] = pd.to_datetime(df["Дата"], errors='coerce')
+            df["Комментарии"] = df["Комментарии"].fillna("").astype(str)
+            df = df.sort_values(["Дата", "Смена"], ascending=[True, True])
+            return df.dropna(subset=["Дата"])[req]
         except Exception as e:
-            st.error(f"Ошибка чтения базы данных: {e}")
-            return pd.DataFrame(columns=["ID", "Дата", "Смена", "№ смены", "Мастер", "Выход металла (кг)", "Счетчик (м3)", "Расход (м3)"])
-    return pd.DataFrame(columns=["ID", "Дата", "Смена", "№ смены", "Мастер", "Выход металла (кг)", "Счетчик (м3)", "Расход (м3)"])
+            st.error(f"Ошибка БД: {e}")
+    return pd.DataFrame(columns=["ID", "Дата", "Смена", "Мастер", "Металл (кг)", "Счетчик (м3)", "Расход (м3)", "Комментарии"])
 
 def save_data(df):
-    df = df.sort_values(["Дата", "№ смены"])
-    df.to_excel(DB_FILE, index=False)
+    df.sort_values(["Дата", "Смена"], ascending=[True, True]).to_excel(DB_FILE, index=False)
 
 if 'db' not in st.session_state:
     st.session_state.db = load_data()
 
-if 'edit_index' not in st.session_state:
-    st.session_state.edit_index = None
-
-st.title("🔥 Финансовый мониторинг плавки")
+st.title("🔥 Мониторинг выплавки и затрат v8.3")
 
 # --- БОКОВАЯ ПАНЕЛЬ ---
-st.sidebar.header("⚙️ Настройки")
-fuel_price = st.sidebar.number_input("Цена топлива (за м³)", min_value=0.0, value=120.0, step=0.1, help="Используется для расчета денежных затрат")
-
-st.sidebar.markdown("---")
-st.sidebar.header("📝 Ввод данных")
-masters_list = sorted(st.session_state.db["Мастер"].astype(str).unique().tolist()) if not st.session_state.db.empty else []
-
-if st.session_state.edit_index is not None:
-    row = st.session_state.db.loc[st.session_state.edit_index]
-    st.sidebar.warning(f"Правка записи ID: {row['ID']}")
-    d_date, d_shift, d_num = pd.to_datetime(row["Дата"]), row["Смена"], int(row["№ смены"])
-    d_master, d_metal, d_count = str(row["Мастер"]), float(row["Выход металла (кг)"]), float(row["Счетчик (м3)"])
-    btn_label = "Обновить"
-else:
-    d_date, d_shift, d_num = datetime.now(), "День", 1
-    d_master, d_metal, d_count = "", 0.0, 0.0
-    btn_label = "Добавить"
+st.sidebar.header("💰 Экономика")
+price_l = st.sidebar.number_input("Цена ДТ (тг/литр)", min_value=0.0, value=320.0, step=1.0)
+price_m3 = price_l * 1000
 
 with st.sidebar.form("entry_form"):
-    in_date = st.date_input("Дата", d_date)
-    in_shift = st.selectbox("Тип смены", ["День", "Ночь"], index=0 if d_shift=="День" else 1)
-    in_num = st.selectbox("№ смены", [1, 2, 3, 4], index=d_num-1 if d_num <= 4 else 0)
-    in_m_sel = st.selectbox("Выбрать мастера", [""] + masters_list)
-    in_m_new = st.text_input("Или вписать нового")
-    in_metal = st.number_input("Выход металла (кг)", min_value=0.0, value=d_metal)
-    in_count = st.number_input("Счетчик (м³)", min_value=0.0, value=d_count, format="%.3f")
-    submit = st.form_submit_button(btn_label)
+    st.markdown("### 📝 Новая запись")
+    in_date = st.date_input("Дата", datetime.now())
+    in_shift = st.selectbox("Смена", ["День", "Ночь"])
+    in_master = st.text_input("Мастер")
+    in_metal = st.number_input("Металл (кг)", min_value=0.0)
+    in_count = st.number_input("Счетчик (м³)", min_value=0.0, format="%.3f")
+    in_comm = st.text_area("События")
+    if st.form_submit_button("Сохранить"):
+        clean_comm = re.sub(r'(чушка|пакет|пачек)?\s*кэз', 'остатки шихтовых', in_comm, flags=re.IGNORECASE)
+        new_row = {"ID": int(datetime.now().timestamp()), "Дата": pd.to_datetime(in_date), "Смена": in_shift, "Мастер": in_master, "Металл (кг)": in_metal, "Счетчик (м3)": in_count, "Расход (м3)": 0.0, "Комментарии": clean_comm}
+        st.session_state.db = pd.concat([st.session_state.db, pd.DataFrame([new_row])], ignore_index=True)
+        st.session_state.db = st.session_state.db.sort_values(["Дата", "Смена"], ascending=[True, True]).reset_index(drop=True)
+        for i in range(1, len(st.session_state.db)):
+            d = st.session_state.db.at[i, "Счетчик (м3)"] - st.session_state.db.at[i-1, "Счетчик (м3)"]
+            st.session_state.db.at[i, "Расход (м3)"] = round(max(0, d), 3) if d < 2.0 else 0.350
+        save_data(st.session_state.db); st.rerun()
 
-if submit:
-    final_master = in_m_new if in_m_new else in_m_sel
-    entry = {
-        "ID": st.session_state.db.loc[st.session_state.edit_index]["ID"] if st.session_state.edit_index is not None else int(datetime.now().timestamp()),
-        "Дата": pd.to_datetime(in_date), "Смена": in_shift, "№ смены": in_num,
-        "Мастер": final_master, "Выход металла (кг)": in_metal,
-        "Счетчик (м3)": in_count, "Расход (м3)": 0.0
-    }
-    if st.session_state.edit_index is not None:
-        st.session_state.db.loc[st.session_state.edit_index] = entry
-        st.session_state.edit_index = None
-    else:
-        st.session_state.db = pd.concat([st.session_state.db, pd.DataFrame([entry])], ignore_index=True)
-    
-    st.session_state.db = st.session_state.db.sort_values(["Дата", "№ смены"]).reset_index(drop=True)
-    for i in range(len(st.session_state.db)):
-        if i > 0:
-            prev_c = st.session_state.db.iloc[i-1]["Счетчик (м3)"]
-            curr_c = st.session_state.db.iloc[i]["Счетчик (м3)"]
-            st.session_state.db.at[i, "Расход (м3)"] = round(curr_c - prev_c, 3) if curr_c >= prev_c else 0.0
-        else:
-            st.session_state.db.at[i, "Расход (м3)"] = 0.0
-    save_data(st.session_state.db)
-    st.rerun()
-
-# --- ФИЛЬТРАЦИЯ И АНАЛИТИКА ---
+# --- АНАЛИТИКА ---
 if not st.session_state.db.empty:
-    df_calc = st.session_state.db.copy()
+    df = st.session_state.db.copy()
+    df["Затраты"] = df["Расход (м3)"] * price_m3
+    df["тг_на_кг"] = df.apply(lambda x: x["Затраты"] / x["Металл (кг)"] if x["Металл (кг)"] > 0 else 0, axis=1)
+    df["Метка"] = df.apply(lambda x: f"{x['Дата'].strftime('%d.%m')} {x['Смена'][0]}", axis=1)
     
-    # 1. Считаем затраты и эффективность для всей базы сразу
-    df_calc["Затраты (денег)"] = df_calc["Расход (м3)"] * fuel_price
-    df_calc["КПД"] = df_calc.apply(lambda x: x["Выход металла (кг)"] / x["Расход (м3)"] if x["Расход (м3)"] > 0 else 0, axis=1)
-    max_k = df_calc["КПД"].max()
-    df_calc["Эффективность (%)"] = df_calc["КПД"].apply(lambda x: round((x / max_k * 100), 1) if max_k > 0 else 0)
+    color_map = {'День': '#3498DB', 'Ночь': '#2C3E50'}
+    df["Цвет"] = df["Смена"].map(color_map)
 
-    # 2. ФИЛЬТР ПО ДАТАМ
-    st.markdown("### 🔍 Фильтрация отчетов")
-    col_f1, col_f2 = st.columns([1, 2])
+    # 1. График: Производство и Расход топлива
+    st.subheader("📊 Производство и Расход топлива")
+    fig1 = make_subplots(specs=[[{"secondary_y": True}]])
+    fig1.add_trace(go.Bar(x=df["Метка"], y=df["Металл (кг)"], marker_color=df["Цвет"], text=df["Металл (кг)"].apply(lambda x: f"{int(x)} кг"), textposition='outside', name="Металл (кг)"), secondary_y=False)
+    fig1.add_trace(go.Scatter(x=df["Метка"], y=df["Расход (м3)"], line=dict(color='#E67E22', width=4), mode='lines+markers+text', text=df["Расход (м3)"].apply(lambda x: f"{x:.3f}"), name="Расход ДТ (м³)"), secondary_y=True)
+    fig1.update_layout(height=500, legend=dict(orientation="h", y=1.1, x=0.5, xanchor="center"), yaxis_range=[0, df["Металл (кг)"].max()*1.3])
+    st.plotly_chart(fig1, use_container_width=True)
+
+    # 2. График: Эффективность плавки и Выплавка (v8.3 ОБНОВЛЕННЫЙ)
+    st.subheader("💰 Эффективность плавки и Выплавка")
+    fig2 = make_subplots(specs=[[{"secondary_y": True}]])
     
-    period = col_f1.selectbox("Период анализа", ["Всё время", "Последние 7 дней", "Текущий месяц", "Свой диапазон"])
+    # Столбики: Эффективность (тг/кг)
+    fig2.add_trace(go.Bar(
+        x=df["Метка"], 
+        y=df["тг_на_кг"], 
+        name="Эффективность (тг/кг)", 
+        marker_color=df["Цвет"], 
+        text=df["тг_на_кг"].apply(lambda x: f"{x:.1f} тг/кг"), # Добавлено /кг
+        textposition='outside', 
+        textfont=dict(size=14, color='black'),
+        cliponaxis=False
+    ), secondary_y=False)
     
-    min_date = df_calc["Дата"].min().date()
-    max_date = df_calc["Дата"].max().date()
+    # Линия: Количество металла (кг) - СПЛОШНАЯ ЗЕЛЕНАЯ
+    fig2.add_trace(go.Scatter(
+        x=df["Метка"], 
+        y=df["Металл (кг)"], 
+        name="Количество металла (кг)", 
+        line=dict(color='#2ECC71', width=4), # Сплошная зеленая линия
+        mode='lines+markers+text',
+        text=df["Металл (кг)"].apply(lambda x: f"{int(x)} кг"),
+        textposition='top center',
+        textfont=dict(size=12, color='#27AD60') # Зеленые подписи
+    ), secondary_y=True)
+
+    fig2.update_layout(
+        height=550, 
+        margin=dict(t=60),
+        legend=dict(orientation="h", y=1.15, x=0.5, xanchor="center", font=dict(size=13)),
+        hovermode="x unified"
+    )
     
-    if period == "Последние 7 дней":
-        start_date = datetime.now().date() - timedelta(days=7)
-        end_date = datetime.now().date()
-    elif period == "Текущий месяц":
-        start_date = datetime.now().date().replace(day=1)
-        end_date = datetime.now().date()
-    elif period == "Свой диапазон":
-        date_range = col_f2.date_input("Выберите диапазон", [min_date, max_date])
-        if len(date_range) == 2:
-            start_date, end_date = date_range
-        else:
-            start_date = end_date = date_range[0]
-    else:
-        start_date, end_date = min_date, max_date
+    fig2.update_yaxes(title_text="Себестоимость (тг/кг)", secondary_y=False, range=[0, df["тг_на_кг"].max()*1.4])
+    fig2.update_yaxes(title_text="Металл (кг)", secondary_y=True, range=[0, df["Металл (кг)"].max()*1.3])
+    st.plotly_chart(fig2, use_container_width=True)
 
-    # Применяем фильтр
-    mask = (df_calc["Дата"].dt.date >= start_date) & (df_calc["Дата"].dt.date <= end_date)
-    df_filtered = df_calc.loc[mask].sort_values(["Дата", "№ смены"])
+    # --- АНАЛИТИЧЕСКИЕ СПОЙЛЕРЫ ---
+    st.markdown("---")
+    with st.expander("🏆 Карточки: Лучшая и худшая смена периода"):
+        df_work = df[df["Металл (кг)"] > 100].copy()
+        if not df_work.empty:
+            best_idx = df_work["тг_на_кг"].idxmin()
+            worst_idx = df_work["тг_на_кг"].idxmax()
+            c1, c2 = st.columns(2)
+            with c1: st.success(f"🏆 **ЛУЧШАЯ ЭФФЕКТИВНОСТЬ**\n\n{df_work.loc[best_idx, 'Дата'].date()} | {df_work.loc[best_idx, 'Смена']}\n\n# {df_work.loc[best_idx, 'тг_на_кг']:.1f} тг/кг\n\nМастер: {df_work.loc[best_idx, 'Мастер']}")
+            with c2: st.error(f"⚠️ **ХУДШАЯ ЭФФЕКТИВНОСТЬ**\n\n{df_work.loc[worst_idx, 'Дата'].date()} | {df_work.loc[worst_idx, 'Смена']}\n\n# {df_work.loc[worst_idx, 'тг_на_кг']:.1f} тг/кг\n\nМастер: {df_work.loc[worst_idx, 'Мастер']}")
 
-    # 3. ИТОГОВЫЕ МЕТРИКИ
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Металла за период", f"{int(df_filtered['Выход металла (кг)'].sum()):,} кг")
-    m2.metric("Топлива за период", f"{df_filtered['Расход (м3)'].sum():.2f} м³")
-    m3.metric("Общие затраты", f"{df_filtered['Затраты (денег)'].sum():,.2f} тенге", delta_color="inverse")
+    with st.expander("📊 График-рейтинг: Смены по возрастанию себестоимости"):
+        df_rank = df[df["Металл (кг)"] > 0].sort_values("тг_на_кг").copy()
+        if not df_rank.empty:
+            fig_rank = go.Figure(go.Bar(x=df_rank["Метка"], y=df_rank["тг_на_кг"], marker_color=df_rank["Цвет"], text=df_rank["тг_на_кг"].apply(lambda x: f"{x:.1f}"), textposition='outside'))
+            fig_rank.update_layout(height=450, title="Рейтинг смен (слева - дешевле 1 кг)", xaxis_title="Смены", yaxis_title="тг/кг")
+            st.plotly_chart(fig_rank, use_container_width=True)
 
-    # --- ВИЗУАЛИЗАЦИЯ ---
-    if not df_filtered.empty:
-        df_filtered["Метка"] = df_filtered.apply(lambda x: f"{x['Дата'].strftime('%d.%m')} №{x['№ смены']}", axis=1)
-        
-        st.subheader("📊 Анализ эффективности и затрат")
-        fig = make_subplots(specs=[[{"secondary_y": True}]])
-        
-        # Металл (КГ)
-        fig.add_trace(go.Bar(x=df_filtered["Метка"], y=df_filtered["Выход металла (кг)"], name="Металл (кг)", 
-                             marker_color='#2E86C1', text=df_filtered["Выход металла (кг)"], textposition='auto', offsetgroup=1), secondary_y=False)
-        
-        # Топливо (М3)
-        fig.add_trace(go.Bar(x=df_filtered["Метка"], y=df_filtered["Расход (м3)"], name="Топливо (м3)", 
-                             marker_color='#E67E22', text=df_filtered["Расход (м3)"], textposition='auto', offsetgroup=2), secondary_y=True)
-
-        fig.update_layout(legend=dict(x=0.5, y=1.1, orientation="h", xanchor="center"), height=500, hovermode="x unified")
-        fig.update_yaxes(title_text="Металл (кг)", secondary_y=False, range=[1000, max(df_filtered["Выход металла (кг)"])*1.1])
-        fig.update_yaxes(title_text="Топливо (м3)", secondary_y=True, range=[0, max(df_filtered["Расход (м3)"])*1.5])
-        
-        st.plotly_chart(fig, use_container_width=True)
-
-        # Таблицы
-        t1, t2 = st.tabs(["📋 Сводная таблица", "⚙️ Журнал"])
-        with t1:
-            display_df = df_filtered.drop(columns=["ID", "КПД"]).copy()
-            display_df["Дата"] = display_df["Дата"].dt.date
-            st.dataframe(display_df.sort_values(["Дата", "№ смены"], ascending=False), use_container_width=True)
-        with t2:
-            for idx, row in df_filtered.iterrows():
-                c1, c2, c3, c4 = st.columns([1, 4, 1, 1])
-                try: display_id = int(row['ID']) % 1000
-                except: display_id = "!!!"
-                c1.write(f"#{display_id}")
-                c2.write(f"**{row['Дата'].date()}** | Смена {row['№ смены']} | {row['Мастер']} | {row['Затраты (денег)']:,.0f} тг")
-                if c3.button("📝", key=f"e_{idx}"): st.session_state.edit_index = idx; st.rerun()
-                if c4.button("🗑️", key=f"d_{idx}"): 
-                    st.session_state.db = st.session_state.db.drop(idx).reset_index(drop=True)
-                    save_data(st.session_state.db); st.rerun()
-    else:
-        st.warning("В выбранном диапазоне дат нет данных.")
 else:
-    st.info("Пожалуйста, внесите данные первой смены.")
+    st.info("Данных нет. Используйте форму в боковой панели.")
